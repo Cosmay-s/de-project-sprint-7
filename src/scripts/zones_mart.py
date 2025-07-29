@@ -8,8 +8,8 @@ from timezone import add_coords_timezone
 def main():
     date = sys.argv[1]
     days_count = int(sys.argv[2])
-    events_base_path = sys.argv[3]
-    geo_base_path = sys.argv[4]
+    events_path = sys.argv[3]
+    geo_path = sys.argv[4]
     zones_mart_path = sys.argv[5]
 
     conf = SparkConf().setAppName(f"ZonesMart-{date}-d{days_count}")
@@ -19,7 +19,7 @@ def main():
     end_date = F.to_date(F.lit(date), "yyyy-MM-dd")
 
     events_zones_mart = (
-        sql.read.parquet(events_base_path)
+        sql.read.parquet(events_path)
         .filter(F.col("date").between(F.date_sub(end_date, days_count),
                                       end_date))
     )
@@ -28,13 +28,11 @@ def main():
         sql.read.option("delimiter", ",")
         .option("header", "true")
         .option("inferSchema", "true")
-        .csv(geo_base_path)
+        .csv(geo_path)
     )
 
     message_city_df = add_coords_timezone(events_zones_mart, geo)
-
     zones_mart = calculate_zones_mart(message_city_df)
-
     zones_mart.write.mode("overwrite").parquet(f"{zones_mart_path}/date={date}/depth={days_count}")
 
 

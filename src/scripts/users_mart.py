@@ -10,8 +10,8 @@ from timezone import add_coords_timezone, calculate_user_localtime
 def main():
     date = sys.argv[1]
     days_count = int(sys.argv[2])
-    events_base_path = sys.argv[3]
-    geo_base_path = sys.argv[4]
+    events_path = sys.argv[3]
+    geo_path = sys.argv[4]
     users_mart_path = sys.argv[5]
 
     conf = SparkConf().setAppName(f"UsersMart-{date}-d{days_count}")
@@ -21,7 +21,7 @@ def main():
     end_date = F.to_date(F.lit(date), "yyyy-MM-dd")
 
     events_users_datamart = (
-        sql.read.parquet(events_base_path)
+        sql.read.parquet(events_path)
         .filter(F.col("date").between(F.date_sub(end_date, days_count),
                                       end_date))
         .where("event.message_from is not null and event_type = 'message'"))
@@ -30,7 +30,7 @@ def main():
         sql.read.option("delimiter", ",")
         .option("header", "true")
         .option("inferSchema", "true")
-        .csv(geo_base_path))
+        .csv(geo_path))
 
     users_mart = calculate_users_mart(
         add_coords_timezone(events_users_datamart, geo))

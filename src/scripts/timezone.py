@@ -24,7 +24,6 @@ def add_coords_timezone(events_df, geo_df):
     geo_broadcast = F.broadcast(geo_prepared)
     joined = events_prepared.crossJoin(geo_broadcast)
 
-    # Формула Хаверсина
     R = 6371.0
     distance_expr = 2 * R * F.asin(
         F.sqrt(
