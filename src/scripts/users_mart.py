@@ -1,110 +1,91 @@
-import os
+import datetime
 import sys
-import datetime as dt
-import pytz
 import pyspark.sql.functions as F
-from pyspark.sql import SparkSession
+from pyspark import SparkConf, SparkContext
+from pyspark.sql import SQLContext
 from pyspark.sql.window import Window
-
-
-os.environ['PYSPARK_PYTHON'] = '/usr/bin/python3'
-os.environ['HADOOP_CONF_DIR'] = '/etc/hadoop/conf'
-os.environ['YARN_CONF_DIR'] = '/etc/hadoop/conf'
+from timezone import add_coords_timezone, calculate_user_localtime
 
 
 def main():
-        date = sys.argv[1]
-        depth = int(sys.argv[2])
-        events_base_path = sys.argv[3]
-        geo_base_path = sys.argv[4]
-        output_base_path = sys.argv[5]
+    date = sys.argv[1]
+    days_count = int(sys.argv[2])
+    events_base_path = sys.argv[3]
+    geo_base_path = sys.argv[4]
+    users_mart_path = sys.argv[5]
 
-        spark = (
-            SparkSession \
-            .builder \
-            .master('yarn') \
-            .appName(f'UsersMart-{date}-d{depth}') \
-            .getOrCreate()
-        )
+    conf = SparkConf().setAppName(f"UsersMart-{date}-d{days_count}")
+    sc = SparkContext(conf=conf)
+    sql = SQLContext(sc)
 
-        events = spark.read.parquet(*input_paths(date, depth, events_base_path))
-        geo_raw = spark.read.csv(geo_base_path, header=True, sep=';')
-        messages = events.where('event.message_to is not null')
-        geo = geo_raw.withColumns({'lat': F.regexp_replace('lat', ',', '.'), 'lon': F.regexp_replace('lng', ',', '.')})
-        cities = get_cities_geo(geo)
-        city_messages = get_city_messages(cities, messages)
-        user_locations = get_users_mart(city_messages)
-        user_locations.write.mode('overwrite').parquet(f'{output_base_path}/date={date}')
+    end_date = F.to_date(F.lit(date), "yyyy-MM-dd")
 
+    events_users_datamart = (
+        sql.read.parquet(events_base_path)
+        .filter(F.col("date").between(F.date_sub(end_date, days_count),
+                                      end_date))
+        .where("event.message_from is not null and event_type = 'message'"))
 
-def input_paths(date_string: str, depth: int, basepath: str):
-    date = dt.datetime.strptime(date_string, '%Y-%m-%d').date()
-    paths = [
-        f'{basepath}/date={date - dt.timedelta(days=num)}' for num in range(depth)
-    ]
-    return paths
+    geo = (
+        sql.read.option("delimiter", ",")
+        .option("header", "true")
+        .option("inferSchema", "true")
+        .csv(geo_base_path))
+
+    users_mart = calculate_users_mart(
+        add_coords_timezone(events_users_datamart, geo))
+
+    users_mart.write.parquet(f"{users_mart_path}/date={date}/depth={days_count}")
 
 
-def calculate_distance(lat1, lat2, lon1, lon2):
-    radius_earth = 6371.0
-    distance_in_kms =(
-        F.round((F.acos((F.sin(F.radians(F.col(lat1))) * F.sin(F.radians(F.col(lat2)))) + \
-           ((F.cos(F.radians(F.col(lat1))) * F.cos(F.radians(F.col(lat2)))) * \
-            (F.cos(F.radians(lon1) - F.radians(lon2))))
-               ) * F.lit(radius_earth)), 4)
-    )
-    return distance_in_kms
+def calculate_users_mart(message_city_df):
+    w_act_city = Window().partitionBy(["user_id"]).orderBy(F.desc("date"))
+    act_city = (
+        message_city_df.withColumn("rn_act_city",
+                                   F.row_number().over(w_act_city))
+        .where("rn_act_city=1")
+        .select("user_id", F.col("city").alias("act_city")))
 
+    w_visits = Window().partitionBy(["user_id"]).orderBy("date")
+    visits = (
+        message_city_df.select("user_id", "city", "date")
+        .withColumn("lag_city", F.lag("city", 1).over(w_visits))
+        .where("lag_city!=city or lag_city is null")
+        .withColumn("lead_date", F.lead("date", 1).over(w_visits))
+        .withColumn(
+            "lead_date_filled",
+            F.when(F.col("lead_date").isNull(),
+                   datetime.date.today()).otherwise(
+                   F.col("lead_date")),)
+        .withColumn(
+            "days_in_city", F.datediff(F.col("lead_date_filled"),
+                                       F.col("date"))))
 
-def get_cities_geo(geo):
-    tz_geo = (
-        geo
-        .withColumn('timezone', F.concat(F.lit('Australia/'), F.col('city')))
-        .filter(F.col('timezone').isin(pytz.all_timezones))
-    )
-    cities = (
-        geo.alias('g').crossJoin(tz_geo.alias('t'))
-        .withColumn('distance', calculate_distance('g.lat', 't.lat', 'g.lon', 't.lon'))
-        .groupBy('g.id', 'g.city', 'g.lat', 'g.lon')
-        .agg(F.min_by('timezone', 'distance').alias('timezone'))
-    )
-    return cities
+    residence_days = 27
+    w_home_city = (
+        Window()
+        .partitionBy(["user_id"])
+        .orderBy(F.desc("days_in_city"), F.desc("date")))
+    home_city = (
+        visits.where(f"days_in_city>={residence_days}")
+        .withColumn("rn_home_city", F.row_number().over(w_home_city))
+        .where(F.col("rn_home_city") == 1)
+        .select("user_id", F.col("city").alias("home_city")))
 
+    travel_cities = (
+        visits.groupby("user_id")
+        .agg(F.collect_list("city").alias("travel_array"))
+        .withColumn("travel_count", F.size(F.col("travel_array"))))
 
-def get_city_messages(cities, messages):
-    message_coordinates = messages.select('lat', 'lon').distinct()
-    city_messages = (
-        message_coordinates.alias('m')
-        .crossJoin(cities.alias('c'))
-        .withColumn('distance', calculate_distance('m.lat', 'c.lat', 'm.lon', 'c.lon'))
-        .groupBy('m.lat', 'm.lon')
-        .agg(F.min_by('c.city', 'distance').alias('city'), F.min_by('c.timezone', 'distance').alias('timezone'))
-        .join(messages, ['lat', 'lon'], 'inner')
-    )
-    return city_messages
+    local_time = calculate_user_localtime(message_city_df)
 
-
-def get_users_mart(city_messages):
-    w = Window.partitionBy('user_id').orderBy('ts')
     users_mart = (
-        city_messages
-        .selectExpr('event.message_from AS user_id', 'event.message_ts AS ts', 'city', 'timezone')
-        .withColumn('last_ts', F.last('ts').over(w.rangeBetween(Window.unboundedPreceding, Window.unboundedFollowing)))
-        .withColumn('start_streak', F.when(F.col('city') != F.lag('city', 1, 'dummy').over(w), F.col('ts')))
-        .filter(F.col('start_streak').isNotNull())
-        .withColumn('end_streak', F.coalesce(F.lead('start_streak', 1).over(w), F.col('last_ts')))
-        .withColumn('cnt_streak', F.date_diff('end_streak', 'start_streak'))
-        .groupBy('user_id') \
-        .agg(
-            F.max_by('city', 'last_ts').alias('act_city'),
-            F.max_by('city', F.when(F.col('cnt_streak') >= 27, F.col('ts'))).alias('home_city'),
-            F.count('*').alias('travel_count'),
-            F.sort_array(F.collect_list(F.struct('ts', 'city')))['city'].alias('travel_array'),
-            F.from_utc_timestamp(F.max('last_ts'), F.max_by('timezone', 'last_ts')).alias('local_time')
-        )   
-    )
+        act_city.join(home_city, on="user_id", how="left")
+        .join(travel_cities, on="user_id", how="left")
+        .join(local_time, on="user_id", how="left"))
+
     return users_mart
 
 
-if __name__ == '__main__':
-    main()   
+if __name__ == "__main__":
+    main()
