@@ -61,7 +61,7 @@ def calculate_zones_mart(message_city_df):
                          1).otherwise(0)).alias("month_reaction"),
             F.sum(F.when(F.col("event_type") == "subscription",
                          1).otherwise(0)).alias("month_subscription"),
-            F.countDistinct(F.when(F.col("event_type") == "registration",
+            F.countDistinct(F.when(F.col("event_type") == "message",
                                    F.col("user_id"))).alias("month_user")
         )
         .withColumnRenamed("city", "zone_id")
@@ -78,7 +78,7 @@ def calculate_zones_mart(message_city_df):
                          1).otherwise(0)).alias("week_reaction"),
             F.sum(F.when(F.col("event_type") == "subscription",
                          1).otherwise(0)).alias("week_subscription"),
-            F.countDistinct(F.when(F.col("event_type") == "registration",
+            F.countDistinct(F.when(F.col("event_type") == "message",
                                    F.col("user_id"))).alias("week_user")
         )
         .withColumnRenamed("city", "zone_id")

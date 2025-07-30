@@ -3,23 +3,33 @@ from pyspark.sql.window import Window
 
 
 def add_coords_timezone(events_df, geo_df):
-    events_prepared = events_df.select(
-        "event.message_id",
-        F.col("event.message_from").alias("user_id"),
-        F.col("lat").alias("message_lat"),
-        F.col("lon").alias("message_lon"),
-        "date",
-        F.to_timestamp("event.datetime").alias("datetime"),
-    ).withColumn("lat1", F.radians(F.col("message_lat"))) \
-     .withColumn("lon1", F.radians(F.col("message_lon")))
+    events_prepared = (
+        events_df
+        .withColumn("unique_id", F.monotonically_increasing_id())
+        .select(
+            "unique_id",
+            "event.message_id",
+            F.col("event.message_from").alias("user_id"),
+            F.col("lat").alias("message_lat"),
+            F.col("lon").alias("message_lon"),
+            "date",
+            F.to_timestamp("event.datetime").alias("datetime"),
+        )
+        .withColumn("lat1", F.radians(F.col("message_lat")))
+        .withColumn("lon1", F.radians(F.col("message_lon")))
+    )
 
-    geo_prepared = geo_df.select(
-        "city",
-        F.col("lat").alias("city_lat"),
-        F.col("lon").alias("city_lon"),
-        F.col("tz").alias("city_tz"),
-    ).withColumn("lat2", F.radians(F.col("city_lat"))) \
-     .withColumn("lon2", F.radians(F.col("city_lon")))
+    geo_prepared = (
+        geo_df
+        .select(
+            "city",
+            F.col("lat").alias("city_lat"),
+            F.col("lon").alias("city_lon"),
+            F.col("tz").alias("city_tz"),
+        )
+        .withColumn("lat2", F.radians(F.col("city_lat")))
+        .withColumn("lon2", F.radians(F.col("city_lon")))
+    )
 
     geo_broadcast = F.broadcast(geo_prepared)
     joined = events_prepared.crossJoin(geo_broadcast)
@@ -35,11 +45,14 @@ def add_coords_timezone(events_df, geo_df):
 
     joined_with_dist = joined.withColumn("distance", distance_expr)
 
-    window = Window.partitionBy("message_id").orderBy(F.col("distance"))
-    message_city = joined_with_dist.withColumn("rn",
-                                               F.row_number().over(window)) \
-                                   .filter("rn = 1") \
-                                   .drop("lat1", "lon1", "lat2", "lon2", "rn")
+    window = Window.partitionBy("unique_id").orderBy(F.col("distance"))
+
+    message_city = (
+        joined_with_dist
+        .withColumn("rn", F.row_number().over(window))
+        .filter("rn = 1")
+        .drop("lat1", "lon1", "lat2", "lon2", "rn")
+    )
 
     return message_city
 
